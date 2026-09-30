@@ -18,12 +18,14 @@ under the License.
 -->
 
 <project>
+  <groupId>foo</groupId>
+  <artifactId>bar</artifactId>
   <name>ejb-plugin-test</name>
   <build>
     <plugins>
       <plugin>
         <artifactId>maven-ejb-plugin</artifactId>
-        <configuration></configuration>
+        <configuration />
       </plugin>
     </plugins>
   </build>

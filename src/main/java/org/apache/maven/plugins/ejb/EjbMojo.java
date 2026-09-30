@@ -18,8 +18,6 @@
  */
 package org.apache.maven.plugins.ejb;
 
-import javax.inject.Inject;
-
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -29,25 +27,24 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.commons.io.input.XmlStreamReader;
-import org.apache.maven.archiver.MavenArchiveConfiguration;
-import org.apache.maven.archiver.MavenArchiver;
-import org.apache.maven.artifact.DependencyResolutionRequiredException;
-import org.apache.maven.execution.MavenSession;
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.plugins.annotations.ResolutionScope;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.project.MavenProjectHelper;
+import org.apache.maven.api.ProducedArtifact;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.Session;
+import org.apache.maven.api.di.Inject;
+import org.apache.maven.api.plugin.Log;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.plugin.annotations.Mojo;
+import org.apache.maven.api.plugin.annotations.Parameter;
+import org.apache.maven.api.services.ProjectManager;
+import org.apache.maven.shared.archiver.MavenArchiveConfiguration;
+import org.apache.maven.shared.archiver.MavenArchiver;
+import org.apache.maven.shared.archiver.MavenArchiverException;
 import org.apache.maven.shared.filtering.FilterWrapper;
 import org.apache.maven.shared.filtering.MavenFileFilter;
 import org.apache.maven.shared.filtering.MavenFilteringException;
 import org.apache.maven.shared.filtering.MavenResourcesExecution;
 import org.codehaus.plexus.archiver.ArchiverException;
 import org.codehaus.plexus.archiver.jar.JarArchiver;
-import org.codehaus.plexus.archiver.jar.ManifestException;
 import org.codehaus.plexus.archiver.util.DefaultFileSet;
 
 /**
@@ -56,12 +53,8 @@ import org.codehaus.plexus.archiver.util.DefaultFileSet;
  * @author <a href="evenisse@apache.org">Emmanuel Venisse</a>
  * @version $Id$
  */
-@Mojo(
-        name = "ejb",
-        requiresDependencyResolution = ResolutionScope.RUNTIME,
-        threadSafe = true,
-        defaultPhase = LifecyclePhase.PACKAGE)
-public class EjbMojo extends AbstractMojo {
+@Mojo(name = "ejb", defaultPhase = "package")
+public class EjbMojo implements org.apache.maven.api.plugin.Mojo {
     private static final List<String> DEFAULT_INCLUDES_LIST = Collections.unmodifiableList(Arrays.asList("**/**"));
 
     private static final String EJB_TYPE = "ejb";
@@ -182,8 +175,8 @@ public class EjbMojo extends AbstractMojo {
     /**
      * The Maven project.
      */
-    @Parameter(defaultValue = "${project}", readonly = true, required = true)
-    private MavenProject project;
+    @Inject
+    private Project project;
 
     /**
      * What EJB version should the EJB Plugin generate? Valid values are "2.x", "3.x" or "4.x" (where x is a digit).
@@ -242,8 +235,8 @@ public class EjbMojo extends AbstractMojo {
     /**
      * @since 2.3
      */
-    @Parameter(defaultValue = "${session}", readonly = true, required = true)
-    private MavenSession session;
+    @Inject
+    private Session session;
 
     /**
      * Timestamp for reproducible output archive entries, either formatted as ISO 8601
@@ -266,29 +259,28 @@ public class EjbMojo extends AbstractMojo {
     private JarArchiver clientJarArchiver = new JarArchiver();
 
     /**
-     * The Maven project's helper.
+     * The service used to attach the generated artifacts to the project.
      */
-    private final MavenProjectHelper projectHelper;
+    @Inject
+    private ProjectManager projectManager;
 
     /**
      * @since 2.3
      */
-    private final MavenFileFilter mavenFileFilter;
+    @Inject
+    private MavenFileFilter mavenFileFilter;
 
     @Inject
-    public EjbMojo(MavenProjectHelper projectHelper, MavenFileFilter mavenFileFilter) {
-        this.projectHelper = projectHelper;
-        this.mavenFileFilter = mavenFileFilter;
-    }
+    private Log log;
 
     /**
      * Generates an EJB jar and optionally an ejb-client jar.
      */
-    public void execute() throws MojoExecutionException {
+    @Override
+    public void execute() throws MojoException {
 
         if (!sourceDirectory.exists()) {
-            getLog().warn("The created EJB jar will be empty cause the " + sourceDirectory.getPath()
-                    + " did not exist.");
+            log.warn("The created EJB jar will be empty cause the " + sourceDirectory.getPath() + " did not exist.");
             sourceDirectory.mkdirs();
         }
 
@@ -297,20 +289,20 @@ public class EjbMojo extends AbstractMojo {
         if (hasClassifier()) {
             if (!isClassifierValid()) {
                 String message = "The given classifier '" + getClassifier() + "' is not valid.";
-                getLog().error(message);
-                throw new MojoExecutionException(message);
+                log.error(message);
+                throw new MojoException(message);
             }
 
             // TODO: We should check the attached artifacts to be sure we don't attach
             // the same file twice...
-            projectHelper.attachArtifact(project, EJB_TYPE, getClassifier(), jarFile);
+            attach(EJB_TYPE, getClassifier(), jarFile);
         } else {
             if (projectHasAlreadySetAnArtifact()) {
-                throw new MojoExecutionException("You have to use a classifier "
+                throw new MojoException("You have to use a classifier "
                         + "to attach supplemental artifacts to the project instead of replacing them.");
             }
 
-            project.getArtifact().setFile(jarFile);
+            projectManager.attachArtifact(project, project.getMainArtifact().orElseThrow(), jarFile.toPath());
         }
 
         if (generateClient) {
@@ -318,31 +310,33 @@ public class EjbMojo extends AbstractMojo {
             if (hasClientClassifier()) {
                 if (!isClientClassifierValid()) {
                     String message = "The given client classifier '" + getClientClassifier() + "' is not valid.";
-                    getLog().error(message);
-                    throw new MojoExecutionException(message);
+                    log.error(message);
+                    throw new MojoException(message);
                 }
 
-                projectHelper.attachArtifact(project, EJB_CLIENT_TYPE, getClientClassifier(), clientJarFile);
+                attach(EJB_CLIENT_TYPE, getClientClassifier(), clientJarFile);
             } else {
                 // FIXME: This does not make sense, cause a classifier for the client should always exist otherwise
                 // Failure!
-                projectHelper.attachArtifact(project, "ejb-client", getClientClassifier(), clientJarFile);
+                attach(EJB_CLIENT_TYPE, getClientClassifier(), clientJarFile);
             }
         }
     }
 
-    private boolean projectHasAlreadySetAnArtifact() {
-        if (getProject().getArtifact().getFile() != null) {
-            return getProject().getArtifact().getFile().isFile();
-        } else {
-            return false;
-        }
+    private void attach(String type, String artifactClassifier, File file) {
+        ProducedArtifact artifact = session.createProducedArtifact(
+                project.getGroupId(), project.getArtifactId(), project.getVersion(), artifactClassifier, null, type);
+        projectManager.attachArtifact(project, artifact, file.toPath());
     }
 
-    private File generateEjb() throws MojoExecutionException {
+    private boolean projectHasAlreadySetAnArtifact() {
+        return projectManager.getPath(project).filter(Files::isRegularFile).isPresent();
+    }
+
+    private File generateEjb() throws MojoException {
         File jarFile = EjbHelper.getJarFile(outputDirectory, jarName, getClassifier());
 
-        getLog().info("Building EJB " + jarName + " with EJB version " + ejbVersion);
+        log.info("Building EJB " + jarName + " with EJB version " + ejbVersion);
 
         MavenArchiver archiver = new MavenArchiver();
 
@@ -381,20 +375,19 @@ public class EjbMojo extends AbstractMojo {
 
             // create archive
             archiver.createArchive(session, project, archive);
-        } catch (ArchiverException | ManifestException | IOException | DependencyResolutionRequiredException e) {
-            throw new MojoExecutionException("There was a problem creating the EJB archive: " + e.getMessage(), e);
+        } catch (ArchiverException | MavenArchiverException | IOException e) {
+            throw new MojoException("There was a problem creating the EJB archive: " + e.getMessage(), e);
         } catch (MavenFilteringException e) {
-            throw new MojoExecutionException(
-                    "There was a problem filtering the deployment descriptor: " + e.getMessage(), e);
+            throw new MojoException("There was a problem filtering the deployment descriptor: " + e.getMessage(), e);
         }
 
         return jarFile;
     }
 
-    private File generateEjbClient() throws MojoExecutionException {
+    private File generateEjbClient() throws MojoException {
         File clientJarFile = EjbHelper.getJarFile(outputDirectory, jarName, getClientClassifier());
 
-        getLog().info("Building EJB client " + clientJarFile.getPath());
+        log.info("Building EJB client " + clientJarFile.getPath());
 
         MavenArchiver clientArchiver = new MavenArchiver();
 
@@ -419,35 +412,34 @@ public class EjbMojo extends AbstractMojo {
 
             clientArchiver.createArchive(session, project, archive);
 
-        } catch (ArchiverException | ManifestException | IOException | DependencyResolutionRequiredException e) {
-            throw new MojoExecutionException(
-                    "There was a problem creating the EJB client archive: " + e.getMessage(), e);
+        } catch (ArchiverException | MavenArchiverException e) {
+            throw new MojoException("There was a problem creating the EJB client archive: " + e.getMessage(), e);
         }
 
         return clientJarFile;
     }
 
-    static void validateEjbVersion(String ejbVersion) throws MojoExecutionException {
+    static void validateEjbVersion(String ejbVersion) throws MojoException {
         if (!ejbVersion.matches("\\A[2-4]\\.[0-9]\\z")) {
-            throw new MojoExecutionException(
+            throw new MojoException(
                     "ejbVersion is not valid: " + ejbVersion + ". Must be 2.x, 3.x or 4.x (where x is a digit)");
         }
     }
 
-    private void checkEJBVersionCompliance(File deploymentDescriptor) throws MojoExecutionException {
+    private void checkEJBVersionCompliance(File deploymentDescriptor) throws MojoException {
         validateEjbVersion(ejbVersion);
 
         if (ejbVersion.matches("\\A2\\.[0-9]\\z") && !deploymentDescriptor.exists()) {
-            throw new MojoExecutionException("Error assembling EJB: " + ejbJar + " is required for ejbVersion 2.x");
+            throw new MojoException("Error assembling EJB: " + ejbJar + " is required for ejbVersion 2.x");
         }
     }
 
     private void filterDeploymentDescriptor(File deploymentDescriptor) throws MavenFilteringException, IOException {
-        getLog().debug("Filtering deployment descriptor.");
+        log.debug("Filtering deployment descriptor.");
         MavenResourcesExecution mavenResourcesExecution = new MavenResourcesExecution();
         mavenResourcesExecution.setEscapeString(escapeString);
         List<FilterWrapper> filterWrappers = mavenFileFilter.getDefaultFilterWrappers(
-                project, filters, escapeBackslashesInFilePath, this.session, mavenResourcesExecution);
+                project, filters, escapeBackslashesInFilePath, session, mavenResourcesExecution);
 
         // Create a temporary file that we can copy-and-filter
         File unfilteredDeploymentDescriptor = new File(sourceDirectory, ejbJar + ".unfiltered");
@@ -457,8 +449,8 @@ public class EjbMojo extends AbstractMojo {
                 StandardCopyOption.REPLACE_EXISTING,
                 StandardCopyOption.COPY_ATTRIBUTES);
         mavenFileFilter.copyFile(
-                unfilteredDeploymentDescriptor,
-                deploymentDescriptor,
+                unfilteredDeploymentDescriptor.toPath(),
+                deploymentDescriptor.toPath(),
                 true,
                 filterWrappers,
                 getEncoding(unfilteredDeploymentDescriptor));
@@ -511,7 +503,7 @@ public class EjbMojo extends AbstractMojo {
         return clientClassifier;
     }
 
-    public MavenProject getProject() {
+    public Project getProject() {
         return project;
     }
 }
